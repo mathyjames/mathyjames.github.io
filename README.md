@@ -1,2 +1,2 @@
 # mathyjames.github.io
-mathyjames.com
+<a href="http://mathyjames.com">MathyJames.com</a>
