@@ -1,0 +1,192 @@
+---
+title: "Work Sample"
+author: "Micah James"
+date: "December 20, 2017"
+output: html_document
+---
+
+# The Problem
+
+Suppose that you were given a spreadsheet that contained the birth year and year
+of death for a list of people. Suppose also that we wish to determine the year
+in which the greatest number of these people had lived. In this post, I'll show a couple different ways one could find the answer to this question using R.
+
+# Some Preliminaries
+
+To begin, we'll load some packages. If you don't already have these installed, I
+highly recommend you install the meta package `tidyverse` to get `dplyr`,
+`stringr`, `tidyr` and many other useful packages. We also load `microbenchmark` so that we can have a discussion about runtimes for the our two solutions.
+
+```{r "Package Loading"}
+# install.packages("tidyverse")
+library(dplyr)
+library(stringr)
+library(tidyr)
+#install.packages("microbenchmark")
+library(microbenchmark)
+```
+
+I don't have a spreadsheet like the one mentioned in the problem so we'll
+generate one here. It's not particularly exciting but it does its job and
+produces a csv with nearly 20,000 rows in it. To avoid recreating that file
+every time this code is run, it first checks to make sure we haven't already
+produced `lifetimes.csv` in the current working directory.
+
+```{r "Creating The Data Set"} 
+if (!file.exists("lifetimes.csv")){
+  set.seed(11111)
+  samplesize <- 200000
+  data_frame(
+    id = 1:samplesize,
+    birthyear = 
+      sample(
+        x = 1901:1999,
+        size = length(id),
+        replace = TRUE
+      ),
+    endyear = birthyear + rgeom(n = length(id),prob = 0.002)
+    ) %>% 
+    filter(endyear < 2000) %>% 
+    write.csv("lifetimes.csv",row.names=FALSE)
+}
+```
+
+```{r "import data set", echo=FALSE}
+lifetimes <- 
+  read.csv(
+    "lifetimes.csv",
+    stringsAsFactors = FALSE
+    ) %>% 
+  as_tibble()
+```
+
+Here's what `lifetimes` looks like. Note that I converted it to a tibble for
+nicer printing.
+
+```{r "lifetimes"}
+head(lifetimes) # Imported from "lifetimes.csv"
+```
+
+Our first solution relies on R's `table` function to do the heavy (and fast)
+lifting. The `table` function applied to a vector will give a frequency table of
+the elements of that vector. The table is returned as a named vector with the
+names equal to the element that is counted and the vector entry is the number of
+times that element appeared.
+
+```{r "Table Demonstrated"}
+Group1 <- c("Alice","Bob","Bob","Bob","Jim","George","George")
+Group2 <- c("Alice","Bob","Jim","Jim","George")
+table(Group1)
+# Note how the names are sorted in the output.
+table(Group2)
+table(Group1) + table(Group2)
+```
+Note that R makes no effort to match up names when adding two tables together.
+What's more, when adding two tables, the names of the first table in the sum becomes the names of the sum.
+```{r "More table demonstration"}
+Group3 <- c("George","Hadley","Leon","Mara")
+table(Group3)
+table(Group2) + table(Group3)
+```
+
+So while the `table` function will do compute our frequencies quickly, we're
+going to rely on dataframes to ensure that the frequencies keep their
+association with their names.
+
+# Our Clever Solution
+
+In our first solution, we'll convert the output of the table function into
+dataframes to preserve the frequencies' associations with their years. The
+clever bit here, is that instead of counting the frequencies of the end years,
+we're going to count the frequencies of the end years plus 1. Consider the
+person in the list with id `r lifetimes$id[1]`. That person has a listed endyear
+of `r lifetimes$endyear[1]` so they presumably were living at the beginning of
+`r lifetimes$endyear[1]`. It is in year `r lifetimes$endyear[1]+1` when they
+stop being counted among the living.
+
+For each year from 1901 through 2000, we will compute the net change in the
+number of people living by adding the number of people born that year and
+subtracting the number of people who died in the previous year. We then will
+compute the cumulative sum of the net changes to compute the number of people
+from this list who were alive at some point in the given year.
+
+```{r "First Solution"}
+addcounts <- function(df){
+  sum(df$counts)
+}
+
+ComputeNetChanges <- function(firstyears, endyears){
+  firstyearcounts <- 
+    table(firstyears)
+  FYDataFrame <- 
+    data_frame(
+      year = str_c("Y", names(firstyearcounts), sep=""),
+      label = "first",
+      counts = firstyearcounts
+    )
+  yearafterendyearcounts <- table(endyears+1)
+  EYDataFrame <- 
+    data_frame(
+      year = str_c("Y", names(yearafterendyearcounts), sep = ""),
+      label = "end",
+      counts = -yearafterendyearcounts
+    )
+  CombinedDataFrame <- 
+    bind_rows(FYDataFrame,EYDataFrame) %>% 
+    group_by(year) %>%
+    nest() %>%
+    mutate(
+      netchange =
+        purrr::map(
+          data,
+          addcounts
+        ) %>% unlist(),
+      numberlived = cumsum(netchange)
+    ) %>%
+    arrange(desc(numberlived))
+  CombinedDataFrame
+}
+microbenchmark(
+  ComputeNetChanges(lifetimes$birthyear, lifetimes$endyear),
+  times=10
+)
+finalresults <- ComputeNetChanges(lifetimes$birthyear, lifetimes$endyear)
+head(finalresults)
+```
+
+As we can see, the year in which the greatest number of these people lived was
+in `r finalresults$year[1]` with `r finalresults$numberlived[1]` different
+people from the list alive at some point during that year.
+
+I consider this solution to be the more clever of the two solutions because,
+apart from the work that the `table` function does for us, each of these other
+operations only involves a single pass through the tibble containing the birth
+and end years for the people in our dataset. This should save on time and memory
+usage.
+
+# A Simpler, Slower Solution
+
+A simpler solution would have been to replace each person with a list of years
+in which they lived. Combining these lists creates a vector in which each number
+represents a single person living in that year. The question then becomes: which
+year occurs most frequently in this list of years?
+
+```{r "brute force solution"}
+YearsAlive <- function(firstyears,endyears){
+  purrr::map2(
+    .x = firstyears,
+    .y = endyears,
+    seq
+  ) %>% unlist %>% table %>% sort(decreasing=TRUE)
+}
+
+microbenchmark(
+  YearsAlive(lifetimes$birthyear,lifetimes$endyear),
+  times=10
+)
+YearsAlive(lifetimes$birthyear,lifetimes$endyear)[1:6]
+```
+
+Note that we relied on the `table` function again this time, but only once at
+the end and only with its intended use. This solution takes, on average, 3 times
+longer on my machine.
